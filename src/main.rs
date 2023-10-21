@@ -2,7 +2,7 @@
 use std::env;
 #[allow(unused_imports)]
 use std::fs;
-use std::io::BufReader;
+use std::io::{self, BufRead, BufReader};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -52,11 +52,18 @@ pub fn git_cat_file(sha: String) -> Result<()> {
 
     let file = fs::File::open(path).context("Failed to open blob file")?;
     let file = BufReader::new(file);
-    let mut reader = flate2::bufread::ZlibDecoder::new(file);
-    let mut stdout = std::io::stdout().lock();
+    let reader = flate2::bufread::ZlibDecoder::new(file);
+    let mut reader = BufReader::new(reader);
+    let mut stdout = io::stdout().lock();
+    let mut buf = Vec::with_capacity(64);
 
+    // Read header: everything until the null byte
+    reader
+        .read_until(0u8, &mut buf)
+        .context("Reading blob header")?;
+    assert!(buf.starts_with(b"blob "), "Invalid blob file");
     // Write content of the blob to stdout
-    std::io::copy(&mut reader, &mut stdout).context("Writing blob content to stdout")?;
+    io::copy(&mut reader, &mut stdout).context("Writing blob content to stdout")?;
 
     Ok(())
 }
