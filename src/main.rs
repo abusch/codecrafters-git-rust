@@ -27,7 +27,7 @@ pub enum Commands {
         #[arg(short = 'p', value_name = "blob_sha")]
         sha: String,
     },
-    HashFile {
+    HashObject {
         #[arg(short = 'w', value_name = "file")]
         file: String,
     },
@@ -38,7 +38,7 @@ fn main() -> Result<()> {
     match args.command {
         Commands::Init => git_init()?,
         Commands::CatFile { sha } => git_cat_file(sha)?,
-        Commands::HashFile { file } => git_hash_file(file)?,
+        Commands::HashObject { file } => git_hash_object(file)?,
     }
 
     Ok(())
@@ -76,7 +76,7 @@ pub fn git_cat_file(sha: String) -> Result<()> {
     Ok(())
 }
 
-pub fn git_hash_file(file: String) -> Result<()> {
+pub fn git_hash_object(file: String) -> Result<()> {
     let file_content = fs::read(file).context("Reading file to hash")?;
     let file_size = file_content.len();
 
