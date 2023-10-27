@@ -21,7 +21,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialze a new git repo
+    /// Initialize a new git repo
     Init,
     CatFile {
         #[arg(short = 'p', value_name = "blob_sha")]
