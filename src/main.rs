@@ -91,7 +91,7 @@ pub fn git_hash_object(file: String) -> Result<()> {
 
     // Hash blob content
     let mut hasher = Sha1::new();
-    hasher.update(&file_content);
+    hasher.update(&buf);
     let result = hasher.finalize();
     let sha1 = hex::encode(result);
     println!("{sha1}");
