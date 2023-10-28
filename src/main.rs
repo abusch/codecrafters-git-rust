@@ -2,15 +2,20 @@
 use std::env;
 #[allow(unused_imports)]
 use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::io::Read;
+use std::io::{self, BufRead, Write};
 
-use anyhow::bail;
+use anyhow::ensure;
 use anyhow::{Context, Result};
+use bytes::Buf;
 use clap::Parser;
 use clap::Subcommand;
-use flate2::Compression;
-use sha1::{Digest, Sha1};
+
+use crate::git::Object;
+use crate::git::ObjectType;
+use crate::git::TreeEntry;
+
+pub mod git;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -31,6 +36,11 @@ pub enum Commands {
         #[arg(short = 'w', value_name = "file")]
         file: String,
     },
+    LsTree {
+        #[arg(long)]
+        name_only: bool,
+        sha: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -39,6 +49,7 @@ fn main() -> Result<()> {
         Commands::Init => git_init()?,
         Commands::CatFile { sha } => git_cat_file(sha)?,
         Commands::HashObject { file } => git_hash_object(file)?,
+        Commands::LsTree { name_only, sha } => read_tree(sha, name_only)?,
     }
 
     Ok(())
@@ -55,79 +66,76 @@ pub fn git_init() -> Result<()> {
 }
 
 pub fn git_cat_file(sha: String) -> Result<()> {
-    let (dirname, filename) = sha.split_at(2);
-    let path: PathBuf = [".git", "objects", dirname, filename].iter().collect();
-
-    let file = fs::File::open(path).context("Failed to open blob file")?;
-    let file = BufReader::new(file);
-    let reader = flate2::bufread::ZlibDecoder::new(file);
-    let mut reader = BufReader::new(reader);
+    let object = Object::read_from_file(sha)?;
     let mut stdout = io::stdout().lock();
-    let mut buf = Vec::with_capacity(64);
 
-    // Read header: everything until the null byte
-    reader
-        .read_until(0u8, &mut buf)
-        .context("Reading blob header")?;
-    assert!(buf.starts_with(b"blob "), "Invalid blob file");
     // Write content of the blob to stdout
-    io::copy(&mut reader, &mut stdout).context("Writing blob content to stdout")?;
+    stdout.write_all(&object.content)?;
 
     Ok(())
 }
 
 pub fn git_hash_object(file: String) -> Result<()> {
     let file_content = fs::read(file).context("Reading file to hash")?;
-    let file_size = file_content.len();
-    let mut buf = Vec::new();
 
-    // Prepare blob content = header + file content
-    //
-    // Write header
-    let header = format!("blob {file_size}\0");
-    buf.extend_from_slice(header.as_bytes());
-    // Write content
-    buf.extend_from_slice(&file_content);
+    let object = Object {
+        object_type: ObjectType::Blob,
+        content: file_content.into(),
+    };
 
-    // Hash blob content
-    let mut hasher = Sha1::new();
-    hasher.update(&buf);
-    let result = hasher.finalize();
-    let sha1 = hex::encode(result);
-    println!("{sha1}");
+    object.write_to_file()?;
 
-    // Create blob directory if needed
-    let (dir_name, file_name) = sha1.split_at(2);
-    let blob_dir: PathBuf = [".git", "objects", dir_name].iter().collect();
-    match blob_dir.try_exists() {
-        // dir already exits
-        Ok(true) => (),
-        // dir doesn't exist: created it
-        Ok(false) => {
-            fs::create_dir(&blob_dir).context("Creating blob directory")?;
+    Ok(())
+}
+
+pub fn read_tree(sha: String, names_only: bool) -> Result<()> {
+    let object = Object::read_from_file(sha)?;
+
+    ensure!(
+        object.object_type == ObjectType::Tree,
+        "Object is not a tree"
+    );
+    let mut reader = object.content.reader();
+
+    let mut tree_entries = Vec::new();
+    loop {
+        let mut buf = Vec::new();
+        let n = reader.read_until(b' ', &mut buf)?;
+        if n == 0 {
+            // We've reached EOF
+            break;
         }
-        Err(e) => bail!(e),
+        // Remove the trailing space we just read
+        buf.pop();
+        let object_type = if buf[0] == b'1' {
+            buf.remove(0);
+            ObjectType::Blob
+        } else {
+            ObjectType::Tree
+        };
+        let mode = String::from_utf8(buf).context("Invalid tree mode")?;
+
+        let mut name = Vec::new();
+        let _ = reader.read_until(0, &mut name)?;
+
+        let mut sha = [0u8; 20];
+        reader.read_exact(&mut sha)?;
+        let sha_ascii = hex::encode(sha);
+        tree_entries.push(TreeEntry {
+            mode,
+            object_type,
+            name,
+            sha1: sha_ascii,
+        });
     }
 
-    // Create blob file
-    let blob_file_name = blob_dir.join(file_name);
-    // Create blob file
-    let mut blob_file = fs::File::options()
-        .create(true)
-        .write(true)
-        .open(blob_file_name)
-        .context("Creating blob file")?;
-    // Wrap blob file in zlib encoder
-    let mut compressed_content =
-        flate2::write::ZlibEncoder::new(&mut blob_file, Compression::fast());
-    // Write blob content
-    compressed_content
-        .write_all(&buf)
-        .context("Writing blob content")?;
-    // Finalize stream
-    compressed_content
-        .finish()
-        .context("Finalizing compressed stream")?;
+    for entry in tree_entries {
+        if names_only {
+            println!("{}", String::from_utf8_lossy(&entry.name));
+        } else {
+            println!("{entry}");
+        }
+    }
 
     Ok(())
 }
