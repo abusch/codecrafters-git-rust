@@ -118,6 +118,8 @@ pub fn read_tree(sha: String, names_only: bool) -> Result<()> {
 
         let mut name = Vec::new();
         let _ = reader.read_until(0, &mut name)?;
+        // Remove trailing null byte
+        name.pop();
 
         let mut sha = [0u8; 20];
         reader.read_exact(&mut sha)?;
