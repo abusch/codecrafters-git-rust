@@ -206,6 +206,9 @@ pub fn write_tree_dir<P: AsRef<Path>>(path: P) -> Result<String> {
         }
     }
 
+    // Sort entries by name
+    tree_entries.sort_by(|a, b| a.name.as_slice().cmp(b.name.as_slice()));
+
     // Prepare content of the tree object
     let mut buf = BytesMut::new();
     for entry in tree_entries.into_iter() {
