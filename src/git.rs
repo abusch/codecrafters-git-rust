@@ -26,7 +26,7 @@ pub struct Object {
 }
 
 impl Object {
-    pub fn read_from_file(sha: String) -> Result<Self, GitError> {
+    pub fn read_from_file(sha: &str) -> Result<Self, GitError> {
         let path = get_object_path(sha);
 
         let file = fs::File::open(path)?;
@@ -56,7 +56,7 @@ impl Object {
         })
     }
 
-    pub fn write_to_file(self) -> Result<(), GitError> {
+    pub fn write_to_file(self) -> Result<String, GitError> {
         let header = format!("{} {}\0", self.object_type, self.content.len());
 
         // compute SHA1
@@ -66,7 +66,7 @@ impl Object {
         let result = hasher.finalize();
         let sha1 = hex::encode(result);
 
-        let path = get_object_path(sha1);
+        let path = get_object_path(&sha1);
         let dir = path.parent().expect("object path to have a parent");
         match dir.try_exists() {
             // dir already exits
@@ -87,11 +87,11 @@ impl Object {
         // write content
         writer.write_all(&self.content)?;
 
-        Ok(())
+        Ok(sha1)
     }
 }
 
-pub fn get_object_path(sha: String) -> PathBuf {
+pub fn get_object_path(sha: &str) -> PathBuf {
     let (dirname, filename) = sha.split_at(2);
     [".git", "objects", dirname, filename].iter().collect()
 }

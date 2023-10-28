@@ -66,7 +66,7 @@ pub fn git_init() -> Result<()> {
 }
 
 pub fn git_cat_file(sha: String) -> Result<()> {
-    let object = Object::read_from_file(sha)?;
+    let object = Object::read_from_file(&sha)?;
     let mut stdout = io::stdout().lock();
 
     // Write content of the blob to stdout
@@ -83,13 +83,14 @@ pub fn git_hash_object(file: String) -> Result<()> {
         content: file_content.into(),
     };
 
-    object.write_to_file()?;
+    let sha = object.write_to_file()?;
+    println!("{sha}");
 
     Ok(())
 }
 
 pub fn read_tree(sha: String, names_only: bool) -> Result<()> {
-    let object = Object::read_from_file(sha)?;
+    let object = Object::read_from_file(&sha)?;
 
     ensure!(
         object.object_type == ObjectType::Tree,
