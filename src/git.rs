@@ -26,6 +26,20 @@ pub struct Object {
 }
 
 impl Object {
+    pub fn blob(content: Vec<u8>) -> Self {
+        Self {
+            object_type: ObjectType::Blob,
+            content: content.into(),
+        }
+    }
+
+    pub fn tree(content: Vec<u8>) -> Self {
+        Self {
+            object_type: ObjectType::Tree,
+            content: content.into(),
+        }
+    }
+
     pub fn read_from_file(sha: &str) -> Result<Self, GitError> {
         let path = get_object_path(sha);
 
