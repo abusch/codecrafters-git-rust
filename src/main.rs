@@ -1,17 +1,8 @@
-#[allow(unused_imports)]
-use std::env;
-#[allow(unused_imports)]
-use std::fs;
-use std::fs::File;
-use std::io::BufReader;
-use std::io::Read;
-use std::io::{self, BufRead, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::prelude::OsStrExt;
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::unix::{fs::PermissionsExt, prelude::OsStrExt};
 use std::path::Path;
-use std::time::Instant;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::ensure;
 use anyhow::{Context, Result};
@@ -263,6 +254,7 @@ pub fn commit_tree(tree_sha: String, parent: String, message: String) -> Result<
     ));
     buf.push('\n');
     buf.push_str(&message);
+    buf.push('\n');
 
     let object = Object::commit(buf.as_bytes().to_vec());
     let sha = object.write_to_file()?;
