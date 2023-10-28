@@ -9,6 +9,9 @@ use std::io::{self, BufRead, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::prelude::OsStrExt;
 use std::path::Path;
+use std::time::Instant;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use anyhow::ensure;
 use anyhow::{Context, Result};
@@ -49,6 +52,13 @@ pub enum Commands {
         sha: String,
     },
     WriteTree,
+    CommitTree {
+        #[arg(short, long)]
+        parent: String,
+        #[arg(short, long)]
+        message: String,
+        tree_sha: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -59,6 +69,11 @@ fn main() -> Result<()> {
         Commands::HashObject { file } => git_hash_object(file)?,
         Commands::LsTree { name_only, sha } => read_tree(sha, name_only)?,
         Commands::WriteTree => write_tree()?,
+        Commands::CommitTree {
+            parent,
+            message,
+            tree_sha,
+        } => commit_tree(tree_sha, parent, message)?,
     }
 
     Ok(())
@@ -229,4 +244,30 @@ pub fn write_tree_dir<P: AsRef<Path>>(path: P) -> Result<String> {
     let sha1 = tree_object.write_to_file()?;
 
     Ok(sha1)
+}
+
+pub fn commit_tree(tree_sha: String, parent: String, message: String) -> Result<()> {
+    let mut buf = String::new();
+    let now = SystemTime::now();
+    let now_seconds = now.duration_since(UNIX_EPOCH)?.as_secs();
+
+    buf.push_str(&format!("tree {tree_sha}\n"));
+    buf.push_str(&format!("parent {parent}\n"));
+    buf.push_str(&format!(
+        "author {} <{}> {} {}\n",
+        "Joe Author", "joe.author@example.com", now_seconds, "+1000",
+    ));
+    buf.push_str(&format!(
+        "committer {} <{}> {} {}\n",
+        "Bob Committer", "bob.committer@example.com", now_seconds, "+1000",
+    ));
+    buf.push('\n');
+    buf.push_str(&message);
+
+    let object = Object::commit(buf.as_bytes().to_vec());
+    let sha = object.write_to_file()?;
+
+    println!("{sha}");
+
+    Ok(())
 }

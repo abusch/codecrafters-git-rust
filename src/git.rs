@@ -40,6 +40,13 @@ impl Object {
         }
     }
 
+    pub fn commit(content: Vec<u8>) -> Self {
+        Self {
+            object_type: ObjectType::Commit,
+            content: content.into(),
+        }
+    }
+
     pub fn read_from_file(sha: &str) -> Result<Self, GitError> {
         let path = get_object_path(sha);
 
