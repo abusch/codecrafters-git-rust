@@ -4,7 +4,7 @@ use std::{
     io::BufRead,
     io::Read,
     io::{BufReader, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
 };
 
@@ -77,7 +77,8 @@ impl Object {
         })
     }
 
-    pub fn write_to_file(self) -> Result<String, GitError> {
+    pub fn write_to_file<P: AsRef<Path>>(self, repo: P) -> Result<String, GitError> {
+        let repo = repo.as_ref();
         let header = format!("{} {}\0", self.object_type, self.content.len());
 
         // compute SHA1
@@ -87,7 +88,7 @@ impl Object {
         let result = hasher.finalize();
         let sha1 = hex::encode(result);
 
-        let path = get_object_path(&sha1);
+        let path = repo.join(get_object_path(&sha1));
         let dir = path.parent().expect("object path to have a parent");
         match dir.try_exists() {
             // dir already exits

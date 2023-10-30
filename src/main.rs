@@ -1,7 +1,7 @@
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::{fs::PermissionsExt, prelude::OsStrExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::ensure;
@@ -11,12 +11,15 @@ use bytes::BufMut;
 use bytes::BytesMut;
 use clap::Parser;
 use clap::Subcommand;
+use reqwest::Url;
 
 use crate::git::Object;
 use crate::git::ObjectType;
 use crate::git::TreeEntry;
 
+pub mod clone;
 pub mod git;
+pub mod pack;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -50,31 +53,39 @@ pub enum Commands {
         message: String,
         tree_sha: String,
     },
+    Clone {
+        url: Url,
+        dir: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
     let args = Cli::parse();
+    let cwd = std::env::current_dir()?;
     match args.command {
-        Commands::Init => git_init()?,
+        Commands::Init => git_init(cwd)?,
         Commands::CatFile { sha } => git_cat_file(sha)?,
-        Commands::HashObject { file } => git_hash_object(file)?,
+        Commands::HashObject { file } => git_hash_object(cwd, file)?,
         Commands::LsTree { name_only, sha } => read_tree(sha, name_only)?,
         Commands::WriteTree => write_tree()?,
         Commands::CommitTree {
             parent,
             message,
             tree_sha,
-        } => commit_tree(tree_sha, parent, message)?,
+        } => commit_tree(cwd, tree_sha, parent, message)?,
+        Commands::Clone { url, dir } => clone::clone(url, dir)?,
     }
 
     Ok(())
 }
 
-pub fn git_init() -> Result<()> {
-    fs::create_dir(".git").context("Creating .git directory")?;
-    fs::create_dir(".git/objects").context("Creating .git/objects directory")?;
-    fs::create_dir(".git/refs").context("Creating .git/refs directory")?;
-    fs::write(".git/HEAD", "ref: refs/heads/master\n").context("creating .git/HEAD file")?;
+pub fn git_init<P: AsRef<Path>>(repo: P) -> Result<()> {
+    let repo = repo.as_ref();
+    fs::create_dir(repo.join(".git")).context("Creating .git directory")?;
+    fs::create_dir(repo.join(".git/objects")).context("Creating .git/objects directory")?;
+    fs::create_dir(repo.join(".git/refs")).context("Creating .git/refs directory")?;
+    fs::write(repo.join(".git/HEAD"), "ref: refs/heads/master\n")
+        .context("creating .git/HEAD file")?;
     println!("Initialized git directory");
 
     Ok(())
@@ -90,7 +101,7 @@ pub fn git_cat_file(sha: String) -> Result<()> {
     Ok(())
 }
 
-pub fn git_hash_object(file: String) -> Result<()> {
+pub fn git_hash_object<P: AsRef<Path>>(repo: P, file: String) -> Result<()> {
     let file_content = fs::read(file).context("Reading file to hash")?;
 
     let object = Object {
@@ -98,7 +109,7 @@ pub fn git_hash_object(file: String) -> Result<()> {
         content: file_content.into(),
     };
 
-    let sha = object.write_to_file()?;
+    let sha = object.write_to_file(repo)?;
     println!("{sha}");
 
     Ok(())
@@ -167,6 +178,7 @@ pub fn write_tree() -> Result<()> {
 }
 
 pub fn write_tree_dir<P: AsRef<Path>>(path: P) -> Result<String> {
+    let path = path.as_ref();
     let dir = fs::read_dir(path)?;
 
     let mut tree_entries = Vec::new();
@@ -199,7 +211,7 @@ pub fn write_tree_dir<P: AsRef<Path>>(path: P) -> Result<String> {
             let mut buf = Vec::new();
             file.read_to_end(&mut buf)?;
             let object = Object::blob(buf);
-            let file_sha = object.write_to_file()?;
+            let file_sha = object.write_to_file(path)?;
             tree_entries.push(TreeEntry {
                 object_type: ObjectType::Blob,
                 mode: mode.to_owned(),
@@ -232,12 +244,17 @@ pub fn write_tree_dir<P: AsRef<Path>>(path: P) -> Result<String> {
     }
 
     let tree_object = Object::tree(buf.into());
-    let sha1 = tree_object.write_to_file()?;
+    let sha1 = tree_object.write_to_file(path)?;
 
     Ok(sha1)
 }
 
-pub fn commit_tree(tree_sha: String, parent: String, message: String) -> Result<()> {
+pub fn commit_tree<P: AsRef<Path>>(
+    repo: P,
+    tree_sha: String,
+    parent: String,
+    message: String,
+) -> Result<()> {
     let mut buf = String::new();
     let now = SystemTime::now();
     let now_seconds = now.duration_since(UNIX_EPOCH)?.as_secs();
@@ -257,7 +274,7 @@ pub fn commit_tree(tree_sha: String, parent: String, message: String) -> Result<
     buf.push('\n');
 
     let object = Object::commit(buf.as_bytes().to_vec());
-    let sha = object.write_to_file()?;
+    let sha = object.write_to_file(repo)?;
 
     println!("{sha}");
 
