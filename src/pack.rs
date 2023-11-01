@@ -36,14 +36,14 @@ pub fn parse_pack(bytes: &mut impl Buf) -> Result<PackFile> {
     println!("Parsing objects...");
     let mut objects = Vec::new();
     for _ in 0..num_objs {
-        let (typ, size) = read_var_int(bytes);
+        let (typ, size) = read_type_and_var_int(bytes);
         let object_type = match typ {
             1 => PackObjectType::ObjCommit,
             2 => PackObjectType::ObjTree,
             3 => PackObjectType::ObjBlob,
             4 => PackObjectType::ObjTag,
             6 => {
-                let ofs = read_var_offset(bytes);
+                let ofs = read_var_int(bytes);
                 PackObjectType::ObjOfsDelta(ofs)
             }
             7 => {
@@ -53,7 +53,7 @@ pub fn parse_pack(bytes: &mut impl Buf) -> Result<PackFile> {
             }
             _ => bail!("Invalid pack object type: {typ}"),
         };
-        println!("Found object with size {size}: {object_type}");
+        // println!("Found object with size {size}: {object_type}");
         let mut buf = Vec::with_capacity(size as usize);
         let mut reader = ZlibDecoder::new(bytes.reader());
         reader.read_to_end(&mut buf)?;
@@ -131,7 +131,7 @@ pub struct PackObject {
 /// the integer
 /// - For all subsequent bytes, the lower 7 bits are concatenated before the previous ones (i.e
 /// each byte is more significant than the previous)
-fn read_var_int(buf: &mut impl Buf) -> (u8, u64) {
+fn read_type_and_var_int(buf: &mut impl Buf) -> (u8, u64) {
     let mut res = 0u64;
     let mut shift_offset = 0;
     let mut typ = 0;
@@ -161,7 +161,7 @@ fn read_var_int(buf: &mut impl Buf) -> (u8, u64) {
 /// Read a variable-length encoded offset
 ///
 /// Same as [read_var_int] except without the type.
-fn read_var_offset(buf: &mut impl Buf) -> u64 {
+pub fn read_var_int(buf: &mut impl Buf) -> u64 {
     let mut res = 0u64;
     let mut shift_offset = 0;
     loop {

@@ -1,62 +1,51 @@
-use std::{collections::HashSet, fmt::Display, fs::create_dir, ops::Deref, path::Path};
+use std::{collections::HashSet, fmt::Display, ops::Deref};
 
 use anyhow::{bail, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use reqwest::{blocking::Client, header::CONTENT_TYPE, Url};
 
-use crate::{git::Object, git_init, pack};
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sha(String);
 
-pub fn clone<P: AsRef<Path>>(url: Url, dir: P) -> Result<()> {
-    println!("Cloning {url} into {}", dir.as_ref().display());
-    let client = GitClient::new(url);
-
-    // Discover refs
-    let (_capabilities, advertised) = client.discover_refs()?;
-    // For now only ask for the first ref, which should be HEAD
-    // TODO: ask for all the refs
-    let sha = advertised
-        .iter()
-        .next()
-        .expect("At least 1 ref to be advertised");
-
-    // Fetch packfile
-    let mut pack_data = client.request_pack(sha)?;
-    let pack_file = pack::parse_pack(&mut pack_data)?;
-    println!("Got packfile: {:?}", pack_file.header);
-
-    // create the requested directory and run `git init`
-    let dir = dir.as_ref();
-    create_dir(dir)?;
-    git_init(dir)?;
-
-    // explode packfile into loose objects
-    // TODO: implement support for packfiles directly, i.e:
-    // - store the packfile in `.git/objects/packs/`
-    // - generate a `.idx` file alongside it
-    // - implement lookup of objects directly from the packfile
-    let mut deltas = Vec::new();
-    for entry in pack_file.objects {
-        let obj = match entry.object_type {
-            pack::PackObjectType::ObjCommit => Object::commit(entry.data.into()),
-            pack::PackObjectType::ObjTree => Object::tree(entry.data.into()),
-            pack::PackObjectType::ObjBlob => Object::blob(entry.data.into()),
-            pack::PackObjectType::ObjTag => {
-                println!("Tag objects not implemented!");
-                continue;
-            }
-            pack::PackObjectType::ObjOfsDelta(_) => {
-                deltas.push(entry);
-                continue;
-            }
-            pack::PackObjectType::ObjRefDelta(_) => {
-                deltas.push(entry);
-                continue;
-            }
-        };
-        obj.write_to_file(dir)?;
+impl Sha {
+    pub fn new(sha: String) -> Self {
+        assert_eq!(sha.len(), 40);
+        Self(sha)
     }
 
-    Ok(())
+    pub fn from_bytes(bytes: [u8; 20]) -> Self {
+        Self(hex::encode(bytes))
+    }
+}
+
+impl Deref for Sha {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_str()
+    }
+}
+
+impl Display for Sha {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ref {
+    pub sha: Sha,
+    pub name: String,
+}
+
+impl Ref {
+    pub fn is_tag(&self) -> bool {
+        self.name.starts_with("refs/tags")
+    }
+
+    pub fn is_peeled_tag(&self) -> bool {
+        self.name.ends_with("^{}")
+    }
 }
 
 pub struct GitClient {
@@ -72,11 +61,9 @@ impl GitClient {
         }
     }
 
-    pub fn discover_refs(&self) -> Result<(HashSet<String>, HashSet<String>)> {
-        // let url = self.repo_url.join("info/refs").unwrap();
+    pub fn discover_refs(&self) -> Result<(HashSet<String>, Vec<Ref>)> {
         let url = format!("{}/info/refs", self.repo_url);
 
-        println!("Making request to discover refs to {url}...");
         let mut res = self
             .client
             .get(url)
@@ -85,8 +72,7 @@ impl GitClient {
             .error_for_status()?
             .bytes()?;
 
-        println!("done");
-        let PktLine::Pkt(first) = read_pkt_line(&mut res)? else {
+        let Pkt::Data(first) = read_pkt_line(&mut res)? else {
             bail!("Invalid response")
         };
         if !first.starts_with(b"# service=git-upload-pack") {
@@ -97,15 +83,14 @@ impl GitClient {
         }
 
         let mut capabilities_set = HashSet::new();
-        let mut advertised = HashSet::new();
+        let mut advertised = Vec::new();
         loop {
             match read_pkt_line(&mut res)? {
-                PktLine::Flush => break,
-                PktLine::Pkt(pkt) => {
-                    println!("Got ref: {}", String::from_utf8_lossy(&pkt));
+                Pkt::Flush => break,
+                Pkt::Data(pkt) => {
+                    // println!("Got ref: {}", String::from_utf8_lossy(&pkt));
                     // first 40 chars are the sha1
                     let sha = pkt.slice(0..40);
-                    advertised.insert(String::from_utf8_lossy(&sha).to_string());
                     // after that and a space, is the ref name
                     let mut ref_name = pkt.slice(41..);
                     if let Some(idx) = ref_name.iter().position(|b| *b == 0) {
@@ -115,9 +100,13 @@ impl GitClient {
                         capabilities.get_u8();
                         capabilities_set = capabilities
                             .split(|b| *b == b' ')
-                            .map(|s| String::from_utf8_lossy(s).to_string())
+                            .map(|s| String::from_utf8_lossy(s).trim().to_string())
                             .collect();
                     }
+                    advertised.push(Ref {
+                        sha: Sha(String::from_utf8_lossy(&sha).to_string()),
+                        name: String::from_utf8_lossy(&ref_name).trim().to_string(),
+                    });
                 }
             }
         }
@@ -133,9 +122,9 @@ impl GitClient {
             // capabilities: include 'side-band-64k' to get progress info, but don't include
             // 'ofs_delta' to simplify things.
             // TODO: support `ofs_delta`
-            PktLine::pkt(format!("want {sha} multi_ack side-band-64k\n")),
-            PktLine::Flush,
-            PktLine::pkt("done\n"),
+            Pkt::data(format!("want {sha} multi_ack side-band-64k\n")),
+            Pkt::Flush,
+            Pkt::data("done\n"),
         ];
 
         let mut buf = BytesMut::new();
@@ -143,7 +132,7 @@ impl GitClient {
             buf.put(pkt.as_bytes());
         }
         let buf = buf.freeze();
-        println!("Sending request:\n{}", String::from_utf8_lossy(&buf));
+        // println!("Sending request:\n{}", String::from_utf8_lossy(&buf));
 
         // TODO: don't read the whole packfile into memory: switch to reqwest's async client and
         // stream to a temp file on disk
@@ -160,8 +149,8 @@ impl GitClient {
         loop {
             let pkt = read_pkt_line(&mut bytes)?;
             match pkt {
-                PktLine::Flush => break,
-                PktLine::Pkt(Pkt(mut bytes)) => {
+                Pkt::Flush => break,
+                Pkt::Data(mut bytes) => {
                     if bytes.starts_with(b"NAK") {
                         println!("Got NAK");
                         continue;
@@ -184,30 +173,30 @@ impl GitClient {
     }
 }
 
-pub fn read_pkt_line(buf: &mut impl Buf) -> Result<PktLine> {
+pub fn read_pkt_line(buf: &mut impl Buf) -> Result<Pkt> {
     let mut size = [0; 4];
     buf.copy_to_slice(&mut size);
 
     let pkt = if &size == b"0000" {
-        PktLine::Flush
+        Pkt::Flush
     } else {
         let size = hex::decode(size)?;
         let size = u16::from_be_bytes(size[0..2].try_into()?);
         let content = buf.copy_to_bytes(size as usize - 4);
-        PktLine::pkt(content)
+        Pkt::data(content)
     };
 
     Ok(pkt)
 }
 
-pub enum PktLine {
+pub enum Pkt {
     Flush,
-    Pkt(Pkt),
+    Data(Bytes),
 }
 
-impl PktLine {
-    pub fn pkt(data: impl Into<Bytes>) -> Self {
-        Self::Pkt(Pkt(data.into()))
+impl Pkt {
+    pub fn data(data: impl Into<Bytes>) -> Self {
+        Self::Data(data.into())
     }
 
     pub fn flush() -> Self {
@@ -216,8 +205,8 @@ impl PktLine {
 
     pub fn is_flush(&self) -> bool {
         match self {
-            PktLine::Flush => true,
-            PktLine::Pkt(_) => false,
+            Pkt::Flush => true,
+            Pkt::Data(_) => false,
         }
     }
 
@@ -225,37 +214,22 @@ impl PktLine {
         let mut buf = BytesMut::new();
         match self {
             Self::Flush => buf.put("0000".as_bytes()),
-            Self::Pkt(pkt) => {
-                buf.put(format!("{:04x}", pkt.0.len() + 4).as_bytes());
-                buf.put(pkt.0);
+            Self::Data(pkt) => {
+                buf.put(format!("{:04x}", pkt.len() + 4).as_bytes());
+                buf.put(pkt);
             }
         }
         buf.freeze()
     }
 }
 
-impl Display for PktLine {
+impl Display for Pkt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PktLine::Flush => writeln!(f, "0000"),
-            PktLine::Pkt(pkt) => {
-                write!(
-                    f,
-                    "{:04x}{}",
-                    pkt.0.len() + 4,
-                    String::from_utf8_lossy(&pkt.0)
-                )
+            Pkt::Flush => writeln!(f, "0000"),
+            Pkt::Data(pkt) => {
+                write!(f, "{:04x}{}", pkt.len() + 4, String::from_utf8_lossy(pkt))
             }
         }
-    }
-}
-
-pub struct Pkt(Bytes);
-
-impl Deref for Pkt {
-    type Target = Bytes;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
     }
 }
