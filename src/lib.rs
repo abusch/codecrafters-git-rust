@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{anyhow, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use flate2::Compression;
 use reqwest::Url;
@@ -33,6 +33,7 @@ pub struct GitRepo {
     git_dir: PathBuf,
     object_dir: PathBuf,
     refs_dir: PathBuf,
+    tags_dir: PathBuf,
 }
 
 impl GitRepo {
@@ -40,11 +41,13 @@ impl GitRepo {
         let git_dir = dir.as_ref().join(".git");
         let object_dir = git_dir.join("objects");
         let refs_dir = git_dir.join("refs");
+        let tags_dir = git_dir.join("tags");
         Self {
             path: dir.as_ref().to_owned(),
             git_dir,
             object_dir,
             refs_dir,
+            tags_dir,
         }
     }
 
@@ -52,6 +55,9 @@ impl GitRepo {
         fs::create_dir(&self.git_dir).context("Creating .git directory")?;
         fs::create_dir(&self.object_dir).context("Creating .git/objects directory")?;
         fs::create_dir(&self.refs_dir).context("Creating .git/refs directory")?;
+        fs::create_dir(self.refs_dir.join("heads"))
+            .context("Creating .git/refs/heads directory")?;
+        fs::create_dir(&self.tags_dir).context("Creating .git/tags directory")?;
         fs::write(self.git_dir.join("HEAD"), "ref: refs/heads/master\n")
             .context("creating .git/HEAD file")?;
         println!("Initialized git directory");
@@ -269,7 +275,7 @@ impl GitRepo {
 
         // create references
         println!("Creating refs:");
-        let tags_dir = dir.join(".git/refs/tags");
+        let tags_dir = repo.refs_dir.join("tags");
         let branches_dir = dir.join(".git/refs/remotes/origin");
         fs::create_dir_all(&tags_dir)?;
         fs::create_dir_all(&branches_dir)?;
@@ -292,8 +298,31 @@ impl GitRepo {
             file.write_all(format!("{}\n", branch.sha).as_bytes())?;
         }
 
+        // set HEAD ref to HEAD of remote
+        let remote_head = advertised
+            .iter()
+            .find(|r| r.name == "HEAD")
+            .ok_or(anyhow!("The remote didn't send us a HEAD reference"))?;
+        let remote_head_target = advertised
+            .iter()
+            .find(|r| r.name != "HEAD" && r.sha == remote_head.sha)
+            .ok_or(anyhow!("No ref found as target of remote HEAD"))?;
+        // Create local branch for HEAD to point to
+        fs::write(
+            repo.git_dir.join(&remote_head_target.name),
+            format!("{}\n", remote_head_target.sha),
+        )?;
+        // Point HEAD to that local branch
+        fs::write(
+            repo.git_dir.join("HEAD"),
+            format!("ref: {}\n", remote_head_target.name),
+        )?;
+
+        // checkout HEAD
+
         Ok(repo)
     }
+
     pub fn store_object(&self, object: Object) -> Result<String, GitError> {
         let header = format!("{} {}\0", object.object_type, object.content.len());
 
