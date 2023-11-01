@@ -1,52 +1,12 @@
-use std::{collections::HashSet, fmt::Display, ops::Deref};
+use std::collections::HashSet;
 
 use anyhow::{bail, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use reqwest::{blocking::Client, header::CONTENT_TYPE, Url};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Sha(String);
+use crate::{pkt::Pkt, Sha};
 
-impl Sha {
-    pub fn new(sha: String) -> Self {
-        assert_eq!(sha.len(), 40);
-        Self(sha)
-    }
-
-    pub fn from_bytes(bytes: [u8; 20]) -> Self {
-        Self(hex::encode(bytes))
-    }
-}
-
-impl Deref for Sha {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_str()
-    }
-}
-
-impl Display for Sha {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Ref {
-    pub sha: Sha,
-    pub name: String,
-}
-
-impl Ref {
-    pub fn is_tag(&self) -> bool {
-        self.name.starts_with("refs/tags")
-    }
-
-    pub fn is_peeled_tag(&self) -> bool {
-        self.name.ends_with("^{}")
-    }
-}
+use super::Ref;
 
 pub struct GitClient {
     client: Client,
@@ -72,20 +32,20 @@ impl GitClient {
             .error_for_status()?
             .bytes()?;
 
-        let Pkt::Data(first) = read_pkt_line(&mut res)? else {
+        let Pkt::Data(first) = Pkt::read_line(&mut res)? else {
             bail!("Invalid response")
         };
         if !first.starts_with(b"# service=git-upload-pack") {
             bail!("Invalid response")
         }
-        if !read_pkt_line(&mut res)?.is_flush() {
+        if !Pkt::read_line(&mut res)?.is_flush() {
             bail!("Expected flush packet");
         }
 
         let mut capabilities_set = HashSet::new();
         let mut advertised = Vec::new();
         loop {
-            match read_pkt_line(&mut res)? {
+            match Pkt::read_line(&mut res)? {
                 Pkt::Flush => break,
                 Pkt::Data(pkt) => {
                     // println!("Got ref: {}", String::from_utf8_lossy(&pkt));
@@ -147,7 +107,7 @@ impl GitClient {
 
         let mut pack_content = BytesMut::new();
         loop {
-            let pkt = read_pkt_line(&mut bytes)?;
+            let pkt = Pkt::read_line(&mut bytes)?;
             match pkt {
                 Pkt::Flush => break,
                 Pkt::Data(mut bytes) => {
@@ -170,66 +130,5 @@ impl GitClient {
         }
 
         Ok(pack_content.freeze())
-    }
-}
-
-pub fn read_pkt_line(buf: &mut impl Buf) -> Result<Pkt> {
-    let mut size = [0; 4];
-    buf.copy_to_slice(&mut size);
-
-    let pkt = if &size == b"0000" {
-        Pkt::Flush
-    } else {
-        let size = hex::decode(size)?;
-        let size = u16::from_be_bytes(size[0..2].try_into()?);
-        let content = buf.copy_to_bytes(size as usize - 4);
-        Pkt::data(content)
-    };
-
-    Ok(pkt)
-}
-
-pub enum Pkt {
-    Flush,
-    Data(Bytes),
-}
-
-impl Pkt {
-    pub fn data(data: impl Into<Bytes>) -> Self {
-        Self::Data(data.into())
-    }
-
-    pub fn flush() -> Self {
-        Self::Flush
-    }
-
-    pub fn is_flush(&self) -> bool {
-        match self {
-            Pkt::Flush => true,
-            Pkt::Data(_) => false,
-        }
-    }
-
-    pub fn as_bytes(self) -> Bytes {
-        let mut buf = BytesMut::new();
-        match self {
-            Self::Flush => buf.put("0000".as_bytes()),
-            Self::Data(pkt) => {
-                buf.put(format!("{:04x}", pkt.len() + 4).as_bytes());
-                buf.put(pkt);
-            }
-        }
-        buf.freeze()
-    }
-}
-
-impl Display for Pkt {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Pkt::Flush => writeln!(f, "0000"),
-            Pkt::Data(pkt) => {
-                write!(f, "{:04x}{}", pkt.len() + 4, String::from_utf8_lossy(pkt))
-            }
-        }
     }
 }

@@ -3,12 +3,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 use clap::Subcommand;
-use git::GitRepo;
+use git_starter_rust::GitRepo;
 use reqwest::Url;
-
-pub mod clone;
-pub mod git;
-pub mod pack;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]

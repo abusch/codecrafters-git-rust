@@ -1,14 +1,11 @@
-use std::{
-    fmt::Display,
-    fs::{self, create_dir, File},
-    io::BufRead,
-    io::{self, Read},
-    io::{BufReader, Write},
-    os::unix::prelude::{OsStrExt, PermissionsExt},
-    path::{Path, PathBuf},
-    str::FromStr,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::fmt::Display;
+use std::fs::{self, create_dir, File};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::ops::Deref;
+use std::os::unix::prelude::{OsStrExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -16,10 +13,12 @@ use flate2::Compression;
 use reqwest::Url;
 use sha1::{Digest, Sha1};
 
-use crate::{
-    clone::GitClient,
-    pack::{self, read_var_int, PackObjectType},
-};
+pub mod client;
+pub mod pack;
+pub mod pkt;
+
+use crate::client::GitClient;
+use crate::pack::PackFile;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
@@ -257,8 +256,7 @@ impl GitRepo {
 
         // Fetch packfile
         let mut pack_data = client.request_pack(&reference.sha)?;
-        let pack_file = pack::parse_pack(&mut pack_data)?;
-        println!("Got packfile: {:?}", pack_file.header);
+        let pack_file = PackFile::parse(&mut pack_data)?;
 
         // create the requested directory and run `git init`
         let dir = dir.as_ref();
@@ -267,105 +265,7 @@ impl GitRepo {
         repo.init()?;
 
         // explode packfile into loose objects
-        // TODO: implement support for packfiles directly, i.e:
-        // - store the packfile in `.git/objects/packs/`
-        // - generate a `.idx` file alongside it
-        // - implement lookup of objects directly from the packfile
-        let mut deltas = Vec::new();
-        let mut count = 0;
-        for entry in pack_file.objects {
-            let obj = match entry.object_type {
-                pack::PackObjectType::ObjCommit => Object::commit(entry.data.into()),
-                pack::PackObjectType::ObjTree => Object::tree(entry.data.into()),
-                pack::PackObjectType::ObjBlob => Object::blob(entry.data.into()),
-                pack::PackObjectType::ObjTag => {
-                    // TODO: implement annotated tags
-                    println!("Tag objects not implemented!");
-                    continue;
-                }
-                pack::PackObjectType::ObjOfsDelta(_) => {
-                    deltas.push(entry);
-                    continue;
-                }
-                pack::PackObjectType::ObjRefDelta(_) => {
-                    deltas.push(entry);
-                    continue;
-                }
-            };
-            repo.store_object(obj)?;
-            count += 1;
-        }
-        println!("Exploded {count} objects");
-
-        // now apply deltas
-        println!("Processing deltas");
-        let mut count = 0;
-        for delta in deltas {
-            let PackObjectType::ObjRefDelta(base) = delta.object_type else {
-                println!("Error: unsupported delta type");
-                continue;
-            };
-
-            let base_object = repo.get_object(&base)?;
-            let mut bytes = delta.data;
-            let base_size = read_var_int(&mut bytes);
-            assert_eq!(
-                base_size as usize,
-                base_object.content.len(),
-                "Base size in delta doesn't match base object size"
-            );
-            let target_size = read_var_int(&mut bytes);
-            let target_size = if target_size == 0 {
-                0x10000
-            } else {
-                target_size
-            };
-            let base_data = base_object.content;
-            let mut reconstructed_data = BytesMut::with_capacity(target_size as usize);
-            // println!("sha={base}, base size={base_size}, target_size={target_size}");
-            while bytes.has_remaining() {
-                let instr = bytes.get_u8();
-                // println!("instr={instr:08b}");
-                if instr & 128 != 0 {
-                    // copy instruction
-                    let mut offset = 0u32;
-                    let mut size = 0u32;
-                    // decode offset and size
-                    // bits 0, 1, 2, 3 are offset
-                    for i in 0..4 {
-                        if instr & (1 << i) != 0 {
-                            offset |= (bytes.get_u8() as u32) << (i * 8);
-                        }
-                    }
-                    // bits 4, 5, 6 are size
-                    for i in 4..7 {
-                        if instr & (1 << i) != 0 {
-                            size |= (bytes.get_u8() as u32) << ((i - 4) * 8);
-                        }
-                    }
-                    let offset = offset as usize;
-                    let size = size as usize;
-                    // println!("Found copy instruction size={size}, offset={offset}");
-                    reconstructed_data.put(&base_data[offset..][..size]);
-                } else {
-                    // add instruction
-                    let size = (instr & 127) as usize;
-                    // println!("Found add instruction size={size}");
-                    assert!(size != 0, "Delta add instruction has zero size!");
-                    reconstructed_data.put(bytes.copy_to_bytes(size));
-                }
-            }
-            // println!("reconstructed object has size {}", reconstructed_data.len());
-            assert_eq!(target_size as usize, reconstructed_data.len());
-            let reconstructed_object = Object {
-                object_type: base_object.object_type,
-                content: reconstructed_data.freeze(),
-            };
-            let _reconstructed_sha = repo.store_object(reconstructed_object)?;
-            // println!("Reconstructed object has sha {reconstructed_sha}");
-            count += 1;
-        }
-        println!("Reconstructed {count} objects from deltas");
+        pack_file.explode_into_repo(&repo)?;
 
         // create references
         println!("Creating refs:");
@@ -540,5 +440,49 @@ impl Display for TreeEntry {
             self.sha1,
             String::from_utf8_lossy(&self.name)
         )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sha(String);
+
+impl Sha {
+    pub fn new(sha: String) -> Self {
+        assert_eq!(sha.len(), 40);
+        Self(sha)
+    }
+
+    pub fn from_bytes(bytes: [u8; 20]) -> Self {
+        Self(hex::encode(bytes))
+    }
+}
+
+impl Deref for Sha {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_str()
+    }
+}
+
+impl Display for Sha {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ref {
+    pub sha: Sha,
+    pub name: String,
+}
+
+impl Ref {
+    pub fn is_tag(&self) -> bool {
+        self.name.starts_with("refs/tags")
+    }
+
+    pub fn is_peeled_tag(&self) -> bool {
+        self.name.ends_with("^{}")
     }
 }
