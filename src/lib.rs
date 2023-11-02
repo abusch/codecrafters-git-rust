@@ -130,6 +130,7 @@ impl GitRepo {
                 if e.file_name() == ".git" {
                     continue;
                 }
+                // recurse
                 let tree_sha = self.write_tree_dir(e.path())?;
                 tree_entries.push(TreeEntry {
                     mode: "40000".to_string(),
@@ -137,7 +138,6 @@ impl GitRepo {
                     name: e.file_name().to_string_lossy().to_string(),
                     sha1: tree_sha,
                 });
-                // recurse
             } else if ft.is_file() {
                 let perms = e.metadata()?.permissions().mode();
                 let mode = if (perms & 0o100) != 0 {
@@ -179,8 +179,7 @@ impl GitRepo {
             buf.put_u8(b' ');
             buf.put(entry.name.as_bytes());
             buf.put_u8(0);
-            let sha_binary = hex::decode(entry.sha1.as_bytes())?;
-            buf.put(sha_binary.as_slice());
+            buf.put(entry.sha1.as_bytes());
         }
 
         let tree_object = Object::tree(buf.into());
