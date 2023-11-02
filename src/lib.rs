@@ -312,13 +312,11 @@ impl GitRepo {
             if entry.object_type == ObjectType::Tree {
                 // directory
                 let new_dir = dir.as_ref().join(entry.name);
-                println!("Creating directory {}", new_dir.display());
                 fs::create_dir_all(&new_dir)?;
                 self.checkout_tree_in_dir(entry.sha1, &new_dir)?;
             } else {
                 // file
                 let file = dir.as_ref().join(entry.name);
-                println!("Checking out file {}", file.display());
                 let blob = self.get_object(entry.sha1)?;
                 fs::write(file, blob.content)?;
             }
