@@ -1,7 +1,6 @@
 use std::fmt::Display;
 use std::fs::{self, create_dir, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::ops::Deref;
 use std::os::unix::prelude::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -65,8 +64,8 @@ impl GitRepo {
         Ok(())
     }
 
-    pub fn cat_file(&self, sha: String) -> Result<()> {
-        let object = self.get_object(&sha)?;
+    pub fn cat_file(&self, oid: ObjectId) -> Result<()> {
+        let object = self.get_object(oid)?;
         let mut stdout = io::stdout().lock();
 
         // Write content of the blob to stdout
@@ -89,8 +88,8 @@ impl GitRepo {
         Ok(())
     }
 
-    pub fn read_tree(&self, sha: String, names_only: bool) -> Result<()> {
-        let object = self.get_object(&sha)?;
+    pub fn read_tree(&self, oid: ObjectId, names_only: bool) -> Result<()> {
+        let object = self.get_object(oid)?;
 
         ensure!(
             object.object_type == ObjectType::Tree,
@@ -119,7 +118,7 @@ impl GitRepo {
         Ok(())
     }
 
-    fn write_tree_dir<P: AsRef<Path>>(&self, path: P) -> Result<Sha> {
+    fn write_tree_dir<P: AsRef<Path>>(&self, path: P) -> Result<ObjectId> {
         let dir = fs::read_dir(path)?;
 
         let mut tree_entries = Vec::new();
@@ -190,12 +189,12 @@ impl GitRepo {
         Ok(sha1)
     }
 
-    pub fn commit_tree(&self, tree_sha: String, parent: String, message: String) -> Result<()> {
+    pub fn commit_tree(&self, tree_oid: ObjectId, parent: ObjectId, message: String) -> Result<()> {
         let mut buf = String::new();
         let now = SystemTime::now();
         let now_seconds = now.duration_since(UNIX_EPOCH)?.as_secs();
 
-        buf.push_str(&format!("tree {tree_sha}\n"));
+        buf.push_str(&format!("tree {tree_oid}\n"));
         buf.push_str(&format!("parent {parent}\n"));
         buf.push_str(&format!(
             "author {} <{}> {} {}\n",
@@ -229,7 +228,7 @@ impl GitRepo {
         let reference = advertised.first().expect("At least 1 ref to be advertised");
 
         // Fetch packfile
-        let mut pack_data = client.request_pack(&reference.sha)?;
+        let mut pack_data = client.request_pack(reference.oid)?;
         let pack_file = PackFile::parse(&mut pack_data)?;
 
         // create the requested directory and run `git init`
@@ -256,14 +255,14 @@ impl GitRepo {
             let tag_name = parts.last().expect("Invalid tag name");
             println!("\tCreating tag {}", tag_name);
             let mut file = File::create(tags_dir.join(tag_name))?;
-            file.write_all(format!("{}\n", tag.sha).as_bytes())?;
+            file.write_all(format!("{}\n", tag.oid).as_bytes())?;
         }
         for branch in branches {
             let parts = branch.name.split('/').collect::<Vec<_>>();
             let branch_name = parts.last().expect("Invalid branch name");
             println!("\tCreating branch {}", branch_name);
             let mut file = File::create(branches_dir.join(branch_name))?;
-            file.write_all(format!("{}\n", branch.sha).as_bytes())?;
+            file.write_all(format!("{}\n", branch.oid).as_bytes())?;
         }
 
         // set HEAD ref to HEAD of remote
@@ -273,12 +272,12 @@ impl GitRepo {
             .ok_or(anyhow!("The remote didn't send us a HEAD reference"))?;
         let remote_head_target = advertised
             .iter()
-            .find(|r| r.name != "HEAD" && r.sha == remote_head.sha)
+            .find(|r| r.name != "HEAD" && r.oid == remote_head.oid)
             .ok_or(anyhow!("No ref found as target of remote HEAD"))?;
         // Create local branch for HEAD to point to
         fs::write(
             repo.git_dir.join(&remote_head_target.name),
-            format!("{}\n", remote_head_target.sha),
+            format!("{}\n", remote_head_target.oid),
         )?;
         // Point HEAD to that local branch
         fs::write(
@@ -295,17 +294,17 @@ impl GitRepo {
     pub fn checkout_head(&self) -> Result<()> {
         let head = self.resolve_head()?;
 
-        let Some(target_commit) = self.get_object(&head)?.as_commit() else {
+        let Some(target_commit) = self.get_object(head)?.as_commit() else {
             bail!("HEAD doesn't point to a commit");
         };
         dbg!(&target_commit);
 
-        self.checkout_tree_in_dir(&target_commit.tree, &self.path)?;
+        self.checkout_tree_in_dir(target_commit.tree, &self.path)?;
 
         Ok(())
     }
 
-    fn checkout_tree_in_dir<P: AsRef<Path>>(&self, tree: &Sha, dir: P) -> Result<()> {
+    fn checkout_tree_in_dir<P: AsRef<Path>>(&self, tree: ObjectId, dir: P) -> Result<()> {
         let Some(tree) = self.get_object(tree)?.as_tree() else {
             bail!("Trying to checkout an object that's not a tree");
         };
@@ -316,12 +315,12 @@ impl GitRepo {
                 let new_dir = dir.as_ref().join(entry.name);
                 println!("Creating directory {}", new_dir.display());
                 fs::create_dir_all(&new_dir)?;
-                self.checkout_tree_in_dir(&entry.sha1, &new_dir)?;
+                self.checkout_tree_in_dir(entry.sha1, &new_dir)?;
             } else {
                 // file
                 let file = dir.as_ref().join(entry.name);
                 println!("Checking out file {}", file.display());
-                let blob = self.get_object(&entry.sha1)?;
+                let blob = self.get_object(entry.sha1)?;
                 fs::write(file, blob.content)?;
             }
         }
@@ -329,7 +328,7 @@ impl GitRepo {
         Ok(())
     }
 
-    fn resolve_head(&self) -> Result<Sha> {
+    fn resolve_head(&self) -> Result<ObjectId> {
         let head = fs::read_to_string(self.git_dir.join("HEAD")).context("Failed to read HEAD")?;
         let head_ref = head
             .strip_prefix("ref: ")
@@ -339,10 +338,10 @@ impl GitRepo {
             fs::read_to_string(self.git_dir.join(head_ref)).context("Failed to read {head_ref}")?;
         let target_ref = target_ref.trim().to_string();
 
-        Ok(Sha(target_ref))
+        ObjectId::from_str(&target_ref)
     }
 
-    pub fn store_object(&self, object: Object) -> Result<Sha, GitError> {
+    pub fn store_object(&self, object: Object) -> Result<ObjectId> {
         let header = format!("{} {}\0", object.object_type, object.content.len());
 
         // compute SHA1
@@ -351,8 +350,9 @@ impl GitRepo {
         hasher.update(&object.content);
         let result = hasher.finalize();
         let sha1 = hex::encode(result);
+        let oid = ObjectId::from_str(&sha1)?;
 
-        let path = self.get_object_path(&sha1);
+        let path = self.get_object_path(oid);
         let dir = path.parent().expect("object path to have a parent");
         // Create parent directory if needed
         fs::create_dir_all(dir)?;
@@ -366,11 +366,11 @@ impl GitRepo {
         // write content
         writer.write_all(&object.content)?;
 
-        Ok(Sha(sha1))
+        Ok(oid)
     }
 
-    pub fn get_object(&self, sha: &str) -> Result<Object, GitError> {
-        let path = self.get_object_path(sha);
+    pub fn get_object(&self, oid: ObjectId) -> Result<Object> {
+        let path = self.get_object_path(oid);
 
         let file = fs::File::open(path)?;
         let file = BufReader::new(file);
@@ -387,7 +387,7 @@ impl GitRepo {
         } else if buf.starts_with(b"commit ") {
             ObjectType::Commit
         } else {
-            return Err(GitError::InvalidObjectType);
+            bail!("Invalid object type");
         };
 
         buf.clear();
@@ -399,7 +399,8 @@ impl GitRepo {
         })
     }
 
-    pub fn get_object_path(&self, sha: &str) -> PathBuf {
+    pub fn get_object_path(&self, oid: ObjectId) -> PathBuf {
+        let sha = oid.to_string();
         let (dirname, filename) = sha.split_at(2);
         self.git_dir
             .join(["objects", dirname, filename].iter().collect::<PathBuf>())
@@ -485,7 +486,7 @@ impl FromStr for ObjectType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Commit {
-    pub tree: Sha,
+    pub tree: ObjectId,
     // pub parent: Vec<Sha>,
     // TODO author, commiter, message....
 }
@@ -495,7 +496,9 @@ impl Commit {
         let mut reader = bytes.reader();
         let tree = read_prefixed_line(&mut reader, "tree ")?;
 
-        Ok(Self { tree: Sha(tree) })
+        Ok(Self {
+            tree: ObjectId::from_str(&tree)?,
+        })
     }
 }
 
@@ -529,7 +532,7 @@ pub struct TreeEntry {
     pub mode: String,
     pub object_type: ObjectType,
     pub name: String,
-    pub sha1: Sha,
+    pub sha1: ObjectId,
 }
 
 impl TreeEntry {
@@ -553,13 +556,13 @@ impl TreeEntry {
 
         let mut sha = [0u8; 20];
         reader.read_exact(&mut sha)?;
-        let sha1 = hex::encode(sha);
+        let sha1 = ObjectId(sha);
 
         Ok(TreeEntry {
             mode,
             object_type,
             name,
-            sha1: Sha(sha1),
+            sha1,
         })
     }
 }
@@ -582,37 +585,41 @@ impl Display for TreeEntry {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Sha(String);
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct ObjectId([u8; 20]);
 
-impl Sha {
-    pub fn new(sha: String) -> Self {
-        assert_eq!(sha.len(), 40);
-        Self(sha)
+impl ObjectId {
+    pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Self> {
+        ensure!(bytes.as_ref().len() == 20);
+        let b: [u8; 20] = bytes.as_ref().try_into()?;
+        Ok(Self(b))
     }
 
-    pub fn from_bytes(bytes: [u8; 20]) -> Self {
-        Self(hex::encode(bytes))
-    }
-}
-
-impl Deref for Sha {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_str()
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
     }
 }
 
-impl Display for Sha {
+impl Display for ObjectId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", hex::encode(self.0))
+    }
+}
+
+impl FromStr for ObjectId {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        ensure!(s.len() == 40);
+        let mut bytes = [0u8; 20];
+        hex::decode_to_slice(s, &mut bytes)?;
+        Ok(Self(bytes))
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ref {
-    pub sha: Sha,
+    pub oid: ObjectId,
     pub name: String,
 }
 

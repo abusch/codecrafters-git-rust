@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use reqwest::{blocking::Client, header::CONTENT_TYPE, Url};
 
-use crate::{pkt::Pkt, Sha};
+use crate::{pkt::Pkt, ObjectId};
 
 use super::Ref;
 
@@ -64,7 +64,7 @@ impl GitClient {
                             .collect();
                     }
                     advertised.push(Ref {
-                        sha: Sha(String::from_utf8_lossy(&sha).to_string()),
+                        oid: String::from_utf8_lossy(&sha).parse()?,
                         name: String::from_utf8_lossy(&ref_name).trim().to_string(),
                     });
                 }
@@ -76,13 +76,13 @@ impl GitClient {
         Ok((capabilities_set, advertised))
     }
 
-    pub fn request_pack(&self, sha: &str) -> Result<Bytes> {
+    pub fn request_pack(&self, oid: ObjectId) -> Result<Bytes> {
         // TODO: implement protocol v2
         let msg = vec![
             // capabilities: include 'side-band-64k' to get progress info, but don't include
             // 'ofs_delta' to simplify things.
             // TODO: support `ofs_delta`
-            Pkt::data(format!("want {sha} multi_ack side-band-64k\n")),
+            Pkt::data(format!("want {oid} multi_ack side-band-64k\n")),
             Pkt::Flush,
             Pkt::data("done\n"),
         ];

@@ -8,7 +8,7 @@ use anyhow::{bail, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use flate2::bufread::ZlibDecoder;
 
-use crate::{GitRepo, Object};
+use crate::{GitRepo, Object, ObjectId};
 
 pub fn parse_pack_from_file<P: AsRef<Path>>(file: P) -> Result<PackFile> {
     let mut bytes: Bytes = std::fs::read(file)?.into();
@@ -78,7 +78,7 @@ impl PackFile {
                 continue;
             };
 
-            let base_object = repo.get_object(&base)?;
+            let base_object = repo.get_object(base)?;
             let mut bytes = delta.data;
             let base_size = read_var_int(&mut bytes);
             assert_eq!(
@@ -158,7 +158,7 @@ pub enum PackObjectType {
     ObjBlob,
     ObjTag,
     ObjOfsDelta(u64),
-    ObjRefDelta(String),
+    ObjRefDelta(ObjectId),
 }
 
 impl Display for PackObjectType {
@@ -194,8 +194,7 @@ impl PackObject {
             }
             7 => {
                 let sha = bytes.copy_to_bytes(20);
-                let sha = hex::encode(&sha);
-                PackObjectType::ObjRefDelta(sha)
+                PackObjectType::ObjRefDelta(ObjectId::from_bytes(&sha)?)
             }
             _ => bail!("Invalid pack object type: {typ}"),
         };

@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::Parser;
 use clap::Subcommand;
 use git_starter_rust::GitRepo;
+use git_starter_rust::ObjectId;
 use reqwest::Url;
 
 #[derive(Parser)]
@@ -19,7 +20,7 @@ pub enum Commands {
     Init,
     CatFile {
         #[arg(short = 'p', value_name = "blob_sha")]
-        sha: String,
+        sha: ObjectId,
     },
     HashObject {
         #[arg(short = 'w', value_name = "file")]
@@ -28,15 +29,15 @@ pub enum Commands {
     LsTree {
         #[arg(long)]
         name_only: bool,
-        sha: String,
+        sha: ObjectId,
     },
     WriteTree,
     CommitTree {
         #[arg(short, long)]
-        parent: String,
+        parent: ObjectId,
         #[arg(short, long)]
         message: String,
-        tree_sha: String,
+        tree_sha: ObjectId,
     },
     Clone {
         url: Url,
