@@ -2,12 +2,12 @@ use std::fmt::Display;
 use std::fs::{self, create_dir, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::Deref;
-use std::os::unix::prelude::{OsStrExt, PermissionsExt};
+use std::os::unix::prelude::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use flate2::Compression;
 use reqwest::Url;
@@ -96,45 +96,13 @@ impl GitRepo {
             object.object_type == ObjectType::Tree,
             "Object is not a tree"
         );
-        let mut reader = object.content.reader();
 
-        let mut tree_entries = Vec::new();
-        loop {
-            let mut buf = Vec::new();
-            let n = reader.read_until(b' ', &mut buf)?;
-            if n == 0 {
-                // We've reached EOF
-                break;
-            }
-            // Remove the trailing space we just read
-            buf.pop();
-            let object_type = if buf[0] == b'1' {
-                buf.remove(0);
-                ObjectType::Blob
-            } else {
-                ObjectType::Tree
-            };
-            let mode = String::from_utf8(buf).context("Invalid tree mode")?;
+        let mut content = object.content.clone();
+        let tree = Tree::parse(&mut content)?;
 
-            let mut name = Vec::new();
-            let _ = reader.read_until(0, &mut name)?;
-            // Remove trailing null byte
-            name.pop();
-
-            let mut sha = [0u8; 20];
-            reader.read_exact(&mut sha)?;
-            let sha_ascii = hex::encode(sha);
-            tree_entries.push(TreeEntry {
-                mode,
-                object_type,
-                name,
-                sha1: sha_ascii,
-            });
-        }
-
-        for entry in tree_entries {
+        for entry in tree.entries {
             if names_only {
-                println!("{}", String::from_utf8_lossy(&entry.name));
+                println!("{}", entry.name);
             } else {
                 println!("{entry}");
             }
@@ -151,7 +119,7 @@ impl GitRepo {
         Ok(())
     }
 
-    fn write_tree_dir<P: AsRef<Path>>(&self, path: P) -> Result<String> {
+    fn write_tree_dir<P: AsRef<Path>>(&self, path: P) -> Result<Sha> {
         let dir = fs::read_dir(path)?;
 
         let mut tree_entries = Vec::new();
@@ -167,7 +135,7 @@ impl GitRepo {
                 tree_entries.push(TreeEntry {
                     mode: "40000".to_string(),
                     object_type: ObjectType::Tree,
-                    name: e.file_name().as_bytes().to_vec(),
+                    name: e.file_name().to_string_lossy().to_string(),
                     sha1: tree_sha,
                 });
                 // recurse
@@ -189,7 +157,7 @@ impl GitRepo {
                     object_type: ObjectType::Blob,
                     mode: mode.to_owned(),
                     sha1: file_sha,
-                    name: e.file_name().as_bytes().to_vec(),
+                    name: e.file_name().to_string_lossy().to_string(),
                 });
             } else {
                 // symlink
@@ -198,7 +166,7 @@ impl GitRepo {
         }
 
         // Sort entries by name
-        tree_entries.sort_by(|a, b| a.name.as_slice().cmp(b.name.as_slice()));
+        tree_entries.sort_by(|a, b| a.name.cmp(&b.name));
 
         // Prepare content of the tree object
         let mut buf = BytesMut::new();
@@ -210,9 +178,9 @@ impl GitRepo {
             };
             buf.put(entry.mode.as_bytes());
             buf.put_u8(b' ');
-            buf.put(entry.name.as_slice());
+            buf.put(entry.name.as_bytes());
             buf.put_u8(0);
-            let sha_binary = hex::decode(entry.sha1)?;
+            let sha_binary = hex::decode(entry.sha1.as_bytes())?;
             buf.put(sha_binary.as_slice());
         }
 
@@ -319,11 +287,62 @@ impl GitRepo {
         )?;
 
         // checkout HEAD
+        repo.checkout_head()?;
 
         Ok(repo)
     }
 
-    pub fn store_object(&self, object: Object) -> Result<String, GitError> {
+    pub fn checkout_head(&self) -> Result<()> {
+        let head = self.resolve_head()?;
+
+        let Some(target_commit) = self.get_object(&head)?.as_commit() else {
+            bail!("HEAD doesn't point to a commit");
+        };
+        dbg!(&target_commit);
+
+        self.checkout_tree_in_dir(&target_commit.tree, &self.path)?;
+
+        Ok(())
+    }
+
+    fn checkout_tree_in_dir<P: AsRef<Path>>(&self, tree: &Sha, dir: P) -> Result<()> {
+        let Some(tree) = self.get_object(tree)?.as_tree() else {
+            bail!("Trying to checkout an object that's not a tree");
+        };
+
+        for entry in tree.entries {
+            if entry.object_type == ObjectType::Tree {
+                // directory
+                let new_dir = dir.as_ref().join(entry.name);
+                println!("Creating directory {}", new_dir.display());
+                fs::create_dir_all(&new_dir)?;
+                self.checkout_tree_in_dir(&entry.sha1, &new_dir)?;
+            } else {
+                // file
+                let file = dir.as_ref().join(entry.name);
+                println!("Checking out file {}", file.display());
+                let blob = self.get_object(&entry.sha1)?;
+                fs::write(file, blob.content)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn resolve_head(&self) -> Result<Sha> {
+        let head = fs::read_to_string(self.git_dir.join("HEAD")).context("Failed to read HEAD")?;
+        let head_ref = head
+            .strip_prefix("ref: ")
+            .ok_or_else(|| anyhow!("Invalid symref: {head}"))?
+            .trim();
+        let target_ref =
+            fs::read_to_string(self.git_dir.join(head_ref)).context("Failed to read {head_ref}")?;
+        let target_ref = target_ref.trim().to_string();
+
+        Ok(Sha(target_ref))
+    }
+
+    pub fn store_object(&self, object: Object) -> Result<Sha, GitError> {
         let header = format!("{} {}\0", object.object_type, object.content.len());
 
         // compute SHA1
@@ -347,7 +366,7 @@ impl GitRepo {
         // write content
         writer.write_all(&object.content)?;
 
-        Ok(sha1)
+        Ok(Sha(sha1))
     }
 
     pub fn get_object(&self, sha: &str) -> Result<Object, GitError> {
@@ -413,6 +432,24 @@ impl Object {
             content: content.into(),
         }
     }
+
+    pub fn as_commit(&self) -> Option<Commit> {
+        if let ObjectType::Commit = self.object_type {
+            let mut content = self.content.clone();
+            Commit::parse(&mut content).ok()
+        } else {
+            None
+        }
+    }
+
+    pub fn as_tree(&self) -> Option<Tree> {
+        if let ObjectType::Tree = self.object_type {
+            let mut content = self.content.clone();
+            Some(Tree::parse(&mut content).expect("Failed to parse tree object"))
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -447,11 +484,84 @@ impl FromStr for ObjectType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Commit {
+    pub tree: Sha,
+    // pub parent: Vec<Sha>,
+    // TODO author, commiter, message....
+}
+
+impl Commit {
+    pub fn parse(bytes: &mut impl Buf) -> Result<Self> {
+        let mut reader = bytes.reader();
+        let tree = read_prefixed_line(&mut reader, "tree ")?;
+
+        Ok(Self { tree: Sha(tree) })
+    }
+}
+
+fn read_prefixed_line(r: &mut impl BufRead, prefix: &str) -> Result<String> {
+    let mut buf = String::new();
+    r.read_line(&mut buf)?;
+    let data = buf.strip_prefix(prefix).expect("invalid data").trim();
+    Ok(data.to_string())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tree {
+    entries: Vec<TreeEntry>,
+}
+
+impl Tree {
+    pub fn parse(bytes: &mut impl Buf) -> Result<Self> {
+        let mut entries = Vec::new();
+
+        while bytes.has_remaining() {
+            let entry = TreeEntry::parse(bytes)?;
+            entries.push(entry);
+        }
+
+        Ok(Tree { entries })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeEntry {
     pub mode: String,
     pub object_type: ObjectType,
-    pub name: Vec<u8>,
-    pub sha1: String,
+    pub name: String,
+    pub sha1: Sha,
+}
+
+impl TreeEntry {
+    pub fn parse(bytes: &mut impl Buf) -> Result<Self> {
+        let mut buf = Vec::new();
+        let mut reader = bytes.reader();
+
+        let n = reader.read_until(b' ', &mut buf)?;
+        let mode = String::from_utf8_lossy(&buf[0..n - 1]).to_string();
+        buf.clear();
+
+        let object_type = if mode.starts_with('1') {
+            ObjectType::Blob
+        } else {
+            ObjectType::Tree
+        };
+
+        let n = reader.read_until(0, &mut buf)?;
+        let name = String::from_utf8_lossy(&buf[0..n - 1]).to_string();
+        buf.clear();
+
+        let mut sha = [0u8; 20];
+        reader.read_exact(&mut sha)?;
+        let sha1 = hex::encode(sha);
+
+        Ok(TreeEntry {
+            mode,
+            object_type,
+            name,
+            sha1: Sha(sha1),
+        })
+    }
 }
 
 impl Display for TreeEntry {
@@ -467,7 +577,7 @@ impl Display for TreeEntry {
             self.mode,
             self.object_type,
             self.sha1,
-            String::from_utf8_lossy(&self.name)
+            self.name,
         )
     }
 }
